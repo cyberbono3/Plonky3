@@ -3,18 +3,18 @@
 use alloc::vec::Vec;
 
 use p3_challenger::{FieldChallenger, GrindingChallenger};
-use p3_field::{ExtensionField, Field, PackedFieldExtension, PackedValue, dot_product};
+use p3_field::{dot_product, ExtensionField, Field, PackedFieldExtension, PackedValue};
 use p3_multilinear_util::point::Point;
 use p3_multilinear_util::poly::Poly;
 use p3_util::log2_strict_usize;
 
-use crate::constraints::Constraint;
-use crate::constraints::statement::EqStatement;
 use crate::constraints::statement::initial::{InitialStatement, InitialStatementInner};
+use crate::constraints::statement::EqStatement;
+use crate::constraints::Constraint;
 use crate::sumcheck::lagrange::lagrange_weights_012_multi;
-use crate::sumcheck::product_polynomial::{ProductPolynomial, sumcheck_coefficients_cross};
+use crate::sumcheck::product_polynomial::{sumcheck_coefficients_cross, ProductPolynomial};
 use crate::sumcheck::svo::SvoClaim;
-use crate::sumcheck::{SumcheckData, extrapolate_012};
+use crate::sumcheck::{extrapolate_012, SumcheckData};
 
 /// Prover state for the sumcheck protocol over a multilinear polynomial.
 ///
@@ -525,5 +525,79 @@ where
 
         // Return the collected verifier challenges.
         Point::new(res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_challenger::DuplexChallenger;
+    use p3_field::extension::BinomialExtensionField;
+    use p3_multilinear_util::point::Point;
+    use p3_multilinear_util::poly::Poly;
+    use rand::rngs::SmallRng;
+    use rand::{RngExt, SeedableRng};
+
+    use super::*;
+    use crate::parameters::SumcheckStrategy;
+
+    type F = BabyBear;
+    type EF = BinomialExtensionField<F, 4>;
+    type Perm = Poseidon2BabyBear<16>;
+    type TestChallenger = DuplexChallenger<F, Perm, 16, 8>;
+
+    fn make_challenger() -> TestChallenger {
+        let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(42));
+        DuplexChallenger::new(perm)
+    }
+
+    #[test]
+    fn test_svo_matches_classic_first_round_batch() {
+        let mut rng = SmallRng::seed_from_u64(11);
+        let num_vars = 12;
+        let folding_factor = 4;
+        let poly = Poly::new((0..1 << num_vars).map(|_| rng.random()).collect::<Vec<F>>());
+
+        let mut classic =
+            InitialStatement::<F, EF>::new(poly.clone(), folding_factor, SumcheckStrategy::Classic);
+        let mut svo =
+            InitialStatement::<F, EF>::new(poly.clone(), folding_factor, SumcheckStrategy::Svo);
+
+        let points = (0..3)
+            .map(|_| Point::<EF>::rand(&mut rng, num_vars))
+            .collect::<Vec<_>>();
+        for point in &points {
+            assert_eq!(classic.evaluate(point), svo.evaluate(point));
+        }
+
+        let mut classic_data = SumcheckData::default();
+        let mut svo_data = SumcheckData::default();
+        let mut classic_challenger = make_challenger();
+        let mut svo_challenger = make_challenger();
+
+        let (classic_prover, classic_rs) = SumcheckProver::from_base_evals(
+            &mut classic_data,
+            &mut classic_challenger,
+            folding_factor,
+            0,
+            &classic,
+        );
+        let (svo_prover, svo_rs) = SumcheckProver::from_base_evals(
+            &mut svo_data,
+            &mut svo_challenger,
+            folding_factor,
+            0,
+            &svo,
+        );
+
+        assert_eq!(classic_rs, svo_rs);
+        assert_eq!(
+            classic_data.polynomial_evaluations,
+            svo_data.polynomial_evaluations
+        );
+        assert_eq!(classic_prover.sum, svo_prover.sum);
+        assert_eq!(classic_prover.evals(), svo_prover.evals());
     }
 }
