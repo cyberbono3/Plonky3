@@ -174,56 +174,30 @@ where
     where
         Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
     {
-        // Sample a batching challenge for combining multiple constraints.
         let alpha: EF = challenger.sample_algebra_element();
-
         let k = poly.num_vars();
-
-        // The packed representation absorbs the last k_pack variables into SIMD lanes.
-        // So the weight polynomial needs only 2^{k - k_pack} packed entries.
         let k_pack = log2_strict_usize(F::Packing::WIDTH);
-
-        // Initialize a zero weight polynomial in packed representation.
         let mut weights = Poly::zero(k - k_pack);
         let mut sum = EF::ZERO;
 
-        // Populate packed weights from equality constraints.
+        // Build the packed weight polynomial and expected evaluation in one pass.
         statement.combine_hypercube_packed::<F, false>(&mut weights, &mut sum, alpha);
 
-        // Pack the base-field evaluations into SIMD lanes.
-        // Each packed element holds SIMD_WIDTH consecutive evaluations.
-        let poly_packed = Poly::new(F::Packing::pack_slice(poly.as_slice()).to_vec());
-
-        // Compute sumcheck coefficients in packed arithmetic.
-        // The result is still in packed form (one value per SIMD lane).
-        let (c0, c2) = sumcheck_coefficients_cross(&poly_packed, &weights);
-
-        // Sum across all SIMD lanes to produce scalar coefficients.
-        // The sumcheck polynomial is a sum over ALL evaluation points, not per-lane.
+        // Compute `(h(0), h(2))` directly from base-field evaluations and packed
+        // weights, avoiding a transient packed copy of `poly`.
+        let (c0, c2) = poly.sumcheck_coefficients_packed::<EF>(&weights);
         let c0 = EF::ExtensionPacking::to_ext_iter([c0]).sum();
         let c2 = EF::ExtensionPacking::to_ext_iter([c2]).sum();
 
-        // Commit (c_0, c_2) to the transcript and receive the challenge.
         let r = sumcheck_data.observe_and_sample(challenger, c0, c2, pow_bits);
 
-        // Fold the packed weight polynomial by binding the first variable to `r`.
         weights.fix_lo_var_mut(r);
-
-        // Fold the base-field evaluations and promote into packed extension field form.
-        // Uses compress_lo_to_packed with a single-variable point to fold and pack.
         let evals = poly.compress_lo_to_packed(&Point::new(alloc::vec![r]), EF::ONE);
-
-        // Update the claimed sum to h(r) via quadratic extrapolation.
         sum = extrapolate_012(c0, sum - c0, c2, r);
 
-        // Wrap into a paired polynomial (packed variant).
-        // The constructor checks whether the data is small enough for scalar mode.
         let mut poly = ProductPolynomial::<F, EF>::new_packed(evals, weights);
-
-        // Verify the sumcheck invariant.
         debug_assert_eq!(poly.dot_product(), sum);
 
-        // Collect all verifier challenges.
         let rs = core::iter::once(r)
             .chain(
                 (1..folding_factor)

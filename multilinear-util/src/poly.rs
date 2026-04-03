@@ -7,8 +7,8 @@ use p3_field::{
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
-use rand::RngExt;
 use rand::distr::{Distribution, StandardUniform};
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::eq_batch::eval_eq_batch;
@@ -328,6 +328,61 @@ impl<F: Field> Poly<F> {
             eval_multilinear_recursive(&self.0, point.as_slice())
         } else {
             SplitEq::new_packed(point, F::ONE).eval_ext(self)
+        }
+    }
+
+    /// Computes quadratic sumcheck coefficients directly from base-field
+    /// evaluations and packed extension-field weights.
+    ///
+    /// This avoids materializing a packed copy of `self` just to compute the
+    /// first-round `(h(0), h(2))` coefficients.
+    #[inline]
+    pub fn sumcheck_coefficients_packed<EF>(
+        &self,
+        weights: &Poly<EF::ExtensionPacking>,
+    ) -> (EF::ExtensionPacking, EF::ExtensionPacking)
+    where
+        EF: ExtensionField<F>,
+        EF::ExtensionPacking: Copy + Send + Sync + Algebra<F::Packing>,
+    {
+        let evals = F::Packing::pack_slice(self.as_slice());
+        let weights = weights.as_slice();
+
+        assert!(log2_strict_usize(evals.len()) >= 1);
+        assert_eq!(evals.len(), weights.len());
+
+        let mid = evals.len() / 2;
+        let (evals_lo, evals_hi) = evals.split_at(mid);
+        let (weights_lo, weights_hi) = weights.split_at(mid);
+
+        if evals.len() >= PARALLEL_THRESHOLD {
+            evals_lo
+                .par_iter()
+                .zip(evals_hi.par_iter())
+                .zip(weights_lo.par_iter().zip(weights_hi.par_iter()))
+                .map(|((&e_lo, &e_hi), (&w_lo, &w_hi))| {
+                    let c0_term = w_lo * e_lo;
+                    let c2_term = (w_hi.double() - w_lo) * (e_hi.double() - e_lo);
+                    (c0_term, c2_term)
+                })
+                .par_fold_reduce(
+                    || (EF::ExtensionPacking::ZERO, EF::ExtensionPacking::ZERO),
+                    |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
+                    |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
+                )
+        } else {
+            evals_lo
+                .iter()
+                .zip(evals_hi.iter())
+                .zip(weights_lo.iter().zip(weights_hi.iter()))
+                .fold(
+                    (EF::ExtensionPacking::ZERO, EF::ExtensionPacking::ZERO),
+                    |(a0, a2), ((&e_lo, &e_hi), (&w_lo, &w_hi))| {
+                        let c0_term = w_lo * e_lo;
+                        let c2_term = (w_hi.double() - w_lo) * (e_hi.double() - e_lo);
+                        (a0 + c0_term, a2 + c2_term)
+                    },
+                )
         }
     }
 
@@ -684,7 +739,8 @@ pub(crate) mod test {
     use p3_baby_bear::BabyBear;
     use p3_field::extension::BinomialExtensionField;
     use p3_field::{
-        ExtensionField, Field, PackedValue, PrimeCharacteristicRing, PrimeField64, dot_product,
+        dot_product, ExtensionField, Field, PackedFieldExtension, PackedValue,
+        PrimeCharacteristicRing, PrimeField64,
     };
     use p3_matrix::dense::RowMajorMatrixView;
     use p3_util::log2_strict_usize;
@@ -694,11 +750,12 @@ pub(crate) mod test {
 
     use crate::eq_batch::eval_eq_batch;
     use crate::point::Point;
-    use crate::poly::{PARALLEL_THRESHOLD, Poly};
+    use crate::poly::{Poly, PARALLEL_THRESHOLD};
 
     type F = BabyBear;
     type PackedF = <F as p3_field::Field>::Packing;
     type EF = BinomialExtensionField<F, 4>;
+    type PackedEF = <EF as ExtensionField<F>>::ExtensionPacking;
 
     /// Naive method to evaluate a multilinear polynomial for testing.
     pub(crate) fn eval_reference<F: Field, EF: ExtensionField<F>>(evals: &[F], point: &[EF]) -> EF {
@@ -972,13 +1029,13 @@ pub(crate) mod test {
         let e1 = F::from_u64(6); // increment when x_2 = 1
         let e2 = F::from_u64(7); // increment when x_1 = 1
         let e3 = F::from_u64(8); // increment when x_1 = x_2 = 1
-        //
-        // So concretely:
-        //
-        //   f(0, 0) = 5
-        //   f(0, 1) = 5 + 6 = 11
-        //   f(1, 0) = 5 + 7 = 12
-        //   f(1, 1) = 5 + 6 + 7 + 8 = 26
+                                 //
+                                 // So concretely:
+                                 //
+                                 //   f(0, 0) = 5
+                                 //   f(0, 1) = 5 + 6 = 11
+                                 //   f(1, 0) = 5 + 7 = 12
+                                 //   f(1, 1) = 5 + 6 + 7 + 8 = 26
         let evals = Poly::new(vec![e0, e0 + e1, e0 + e2, e0 + e1 + e2 + e3]);
 
         // Choose evaluation point:
@@ -1732,6 +1789,42 @@ pub(crate) mod test {
                 assert_eq!(compressed0.num_vars(), compressed1.num_vars());
                 assert_eq!(compressed0, compressed1);
             }
+        }
+    }
+
+    #[test]
+    fn test_sumcheck_coefficients_packed_matches_scalar_reference() {
+        let mut rng = SmallRng::seed_from_u64(42);
+        let k_pack = log2_strict_usize(PackedF::WIDTH);
+
+        for k in (k_pack + 1)..=(k_pack + 4) {
+            let evals = Poly::<F>::rand(&mut rng, k);
+            let weights = Poly::<EF>::rand(&mut rng, k).pack::<F, EF>();
+
+            let (c0_packed, c2_packed) = evals.sumcheck_coefficients_packed::<EF>(&weights);
+            let c0: EF = <PackedEF as PackedFieldExtension<F, EF>>::to_ext_iter([c0_packed]).sum();
+            let c2: EF = <PackedEF as PackedFieldExtension<F, EF>>::to_ext_iter([c2_packed]).sum();
+
+            let half = evals.num_evals() / 2;
+            let (e_lo, e_hi) = evals.as_slice().split_at(half);
+            let unpacked_weights = weights.unpack::<F, EF>();
+            let (w_lo, w_hi) = unpacked_weights.as_slice().split_at(half);
+
+            let expected = e_lo
+                .iter()
+                .zip(e_hi.iter())
+                .zip(w_lo.iter().zip(w_hi.iter()))
+                .fold(
+                    (EF::ZERO, EF::ZERO),
+                    |(a0, a2), ((&e_lo, &e_hi), (&w_lo, &w_hi))| {
+                        let e2 = e_hi.double() - e_lo;
+                        let w2 = w_hi.double() - w_lo;
+                        (a0 + EF::from(e_lo) * w_lo, a2 + EF::from(e2) * w2)
+                    },
+                );
+
+            assert_eq!(c0, expected.0, "c0 mismatch for k={k}");
+            assert_eq!(c2, expected.1, "c2 mismatch for k={k}");
         }
     }
 }
