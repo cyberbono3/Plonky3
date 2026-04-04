@@ -190,6 +190,14 @@ fn evals_012_grid<F: Field>(boolean_evals: &[F]) -> Vec<F> {
     recurse(boolean_evals, num_vars)
 }
 
+fn pointwise_products<F: Field>(lhs: &[F], rhs: &[F]) -> Vec<F> {
+    lhs.iter()
+        .copied()
+        .zip(rhs.iter().copied())
+        .map(|(a, b)| a * b)
+        .collect()
+}
+
 /// Computes the SVO accumulators for a round using the Jolt small-grid pattern.
 ///
 /// Rather than rebuilding every Lagrange basis vector independently, this path
@@ -218,18 +226,8 @@ fn calculate_accumulators_jolt<F: Field, EF: ExtensionField<F>>(
     let reduced_grid = evals_012_grid(reduced_evals.as_slice());
     let stride = 3usize.pow((l - 1) as u32);
 
-    let acc0 = eq0_grid[..stride]
-        .iter()
-        .copied()
-        .zip(reduced_grid[..stride].iter().copied())
-        .map(|(eq, eval)| eq * eval)
-        .collect();
-    let acc2 = eq0_grid[2 * stride..]
-        .iter()
-        .copied()
-        .zip(reduced_grid[2 * stride..].iter().copied())
-        .map(|(eq, eval)| eq * eval)
-        .collect();
+    let acc0 = pointwise_products(&eq0_grid[..stride], &reduced_grid[..stride]);
+    let acc2 = pointwise_products(&eq0_grid[2 * stride..], &reduced_grid[2 * stride..]);
 
     [acc0, acc2]
 }

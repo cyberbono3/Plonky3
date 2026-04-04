@@ -27,7 +27,6 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
 p3-baby-bear = { path = "../baby-bear" }
 p3-koala-bear = { path = "../koala-bear" }
 proptest.workspace = true
