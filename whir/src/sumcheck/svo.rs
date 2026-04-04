@@ -28,6 +28,17 @@ use p3_multilinear_util::poly::Poly;
 use p3_multilinear_util::split_eq::SplitEq;
 use p3_util::{log2_strict_usize, log3_strict_usize};
 
+/// Selects how SVO accumulators are constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvoAccumulatorStrategy {
+    /// Baseline implementation that reconstructs every accumulator by explicit
+    /// Lagrange basis dot products.
+    Lagrange,
+    /// Jolt-style implementation that first expands the relevant multilinear
+    /// tables onto the `{0,1,2}^l` grid and then takes pointwise products.
+    Jolt,
+}
+
 /// Generates grid points for SVO accumulator evaluation.
 ///
 /// Returns two arrays of `3^{l-1}` points each:
@@ -151,6 +162,78 @@ fn calculate_accumulators<F: Field, EF: ExtensionField<F>>(
         .collect()
 }
 
+/// Expands Boolean-hypercube evaluations onto the full `{0,1,2}^l` grid.
+///
+/// The input is ordered with the low variable varying fastest. The output keeps
+/// the same convention, so the last variable is the slowest-varying coordinate.
+fn evals_012_grid<F: Field>(boolean_evals: &[F]) -> Vec<F> {
+    let num_vars = log2_strict_usize(boolean_evals.len());
+
+    fn recurse<F: Field>(boolean_evals: &[F], num_vars: usize) -> Vec<F> {
+        if num_vars == 0 {
+            return vec![boolean_evals[0]];
+        }
+
+        let half = boolean_evals.len() / 2;
+        let low = recurse(&boolean_evals[..half], num_vars - 1);
+        let high = recurse(&boolean_evals[half..], num_vars - 1);
+        let mut out = Vec::with_capacity(low.len() * 3);
+
+        for (&a, &b) in low.iter().zip(high.iter()) {
+            out.push(a);
+            out.push(b);
+            out.push(b.double() - a);
+        }
+
+        out
+    }
+
+    recurse(boolean_evals, num_vars)
+}
+
+/// Returns the elementwise products of two equally sized slices.
+fn pointwise_products<F: Field>(lhs: &[F], rhs: &[F]) -> Vec<F> {
+    lhs.iter()
+        .copied()
+        .zip(rhs.iter().copied())
+        .map(|(a, b)| a * b)
+        .collect()
+}
+
+/// Computes the SVO accumulators for a round using the Jolt small-grid pattern.
+///
+/// Rather than rebuilding every Lagrange basis vector independently, this path
+/// first evaluates both the residual equality polynomial and the partially
+/// compressed multilinear polynomial over the entire `{0,1,2}^l` grid. The
+/// required accumulators are then simple pointwise products on the slices with
+/// final coordinate fixed to `0` or `2`.
+fn calculate_accumulators_jolt<F: Field, EF: ExtensionField<F>>(
+    l: usize,
+    partial_evals: &[EF],
+    point: &[EF],
+) -> [Vec<EF>; 2] {
+    let total_vars = log2_strict_usize(partial_evals.len());
+    let offset = total_vars - l;
+    let (z0, z1) = point.split_at(point.len() - offset);
+
+    let eq0 = Poly::new_from_point(z0, EF::ONE);
+    let eq1 = Poly::new_from_point(z1, EF::ONE);
+
+    let reduced_evals: Vec<EF> = partial_evals
+        .chunks(eq1.num_evals())
+        .map(|chunk| dot_product::<EF, _, _>(eq1.iter().copied(), chunk.iter().copied()))
+        .collect();
+
+    let eq0_grid = evals_012_grid(eq0.as_slice());
+    let reduced_grid = evals_012_grid(reduced_evals.as_slice());
+    let stride = 3usize.pow((l - 1) as u32);
+
+    let acc0 = pointwise_products(&eq0_grid[..stride], &reduced_grid[..stride]);
+    let acc2 = pointwise_products(&eq0_grid[2 * stride..], &reduced_grid[2 * stride..]);
+
+    [acc0, acc2]
+}
+
 /// Challenge point split into an SVO prefix and a residual split-eq suffix.
 #[derive(Debug, Clone)]
 struct SvoPoint<F: Field, EF: ExtensionField<F>> {
@@ -262,6 +345,17 @@ impl<F: Field, EF: ExtensionField<F>> SvoClaim<F, EF> {
     /// 4. Precomputes accumulators for all `l` SVO rounds.
     #[tracing::instrument(skip_all)]
     pub fn new(point: &Point<EF>, l: usize, poly: &Poly<F>) -> Self {
+        Self::new_with_strategy(point, l, poly, SvoAccumulatorStrategy::Jolt)
+    }
+
+    /// Like [`Self::new`], but lets callers choose the accumulator backend.
+    #[tracing::instrument(skip_all)]
+    pub fn new_with_strategy(
+        point: &Point<EF>,
+        l: usize,
+        poly: &Poly<F>,
+        strategy: SvoAccumulatorStrategy,
+    ) -> Self {
         let k = point.num_vars();
         assert_eq!(k, poly.num_vars());
         assert!(k > l);
@@ -286,11 +380,24 @@ impl<F: Field, EF: ExtensionField<F>> SvoClaim<F, EF> {
 
         // Precompute accumulators for all SVO rounds.
         let accumulators = (1..=z_svo.num_vars())
-            .map(|i| {
-                let us = points_012::<F>(i);
-                let acc0 = calculate_accumulators(&us[0], partial_evals.as_slice(), z_svo.as_slice());
-                let acc2 = calculate_accumulators(&us[1], partial_evals.as_slice(), z_svo.as_slice());
-                [acc0, acc2]
+            .map(|i| match strategy {
+                SvoAccumulatorStrategy::Lagrange => {
+                    let us = points_012::<F>(i);
+                    let acc0 = calculate_accumulators(
+                        &us[0],
+                        partial_evals.as_slice(),
+                        z_svo.as_slice(),
+                    );
+                    let acc2 = calculate_accumulators(
+                        &us[1],
+                        partial_evals.as_slice(),
+                        z_svo.as_slice(),
+                    );
+                    [acc0, acc2]
+                }
+                SvoAccumulatorStrategy::Jolt => {
+                    calculate_accumulators_jolt(i, partial_evals.as_slice(), z_svo.as_slice())
+                }
             })
             .collect();
 
@@ -586,6 +693,69 @@ mod tests {
                         assert_eq!(acc, e1);
                     });
             }
+        }
+    }
+
+    #[test]
+    fn test_evals_012_grid_matches_naive_mle_evaluation() {
+        let mut rng = SmallRng::seed_from_u64(7);
+        let num_vars = 4;
+        let evals = (0..1 << num_vars)
+            .map(|_| rng.random::<EF>())
+            .collect::<Vec<_>>();
+        let poly = Poly::new(evals.clone());
+        let grid = evals_012_grid(evals.as_slice());
+        let total = 3usize.pow(num_vars as u32);
+
+        for idx in 0..total {
+            let mut tmp = idx;
+            let mut digits = Vec::with_capacity(num_vars);
+            for _ in 0..num_vars {
+                digits.push(tmp % 3);
+                tmp /= 3;
+            }
+
+            let point = Point::new(
+                digits
+                    .iter()
+                    .copied()
+                    .map(|digit| EF::from(F::from_u32(digit as u32)))
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                grid[idx],
+                compress_multi_ef(&poly, point.as_slice()).as_slice()[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_accumulator_strategies_match() {
+        let k = 12;
+        let mut rng = SmallRng::seed_from_u64(9);
+        let poly = Poly::new((0..1 << k).map(|_| rng.random()).collect());
+        let point = Point::<EF>::rand(&mut rng, k);
+
+        for l in 1..k / 2 {
+            let lagrange = SvoClaim::<F, EF>::new_with_strategy(
+                &point,
+                l,
+                &poly,
+                SvoAccumulatorStrategy::Lagrange,
+            );
+            let jolt = SvoClaim::<F, EF>::new_with_strategy(
+                &point,
+                l,
+                &poly,
+                SvoAccumulatorStrategy::Jolt,
+            );
+
+            assert_eq!(lagrange.eval(), jolt.eval(), "eval mismatch for l={l}");
+            assert_eq!(
+                lagrange.accumulators(),
+                jolt.accumulators(),
+                "accumulator mismatch for l={l}"
+            );
         }
     }
 

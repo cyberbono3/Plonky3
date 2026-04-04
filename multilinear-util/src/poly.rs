@@ -35,6 +35,52 @@ unsafe fn uninitialized_vec<A>(len: usize) -> Vec<A> {
     }
 }
 
+fn sumcheck_coefficients_packed_slices<PackedF, PackedEF>(
+    evals: &[PackedF],
+    weights: &[PackedEF],
+) -> (PackedEF, PackedEF)
+where
+    PackedF: PrimeCharacteristicRing + Copy + Send + Sync,
+    PackedEF: PrimeCharacteristicRing + Copy + Send + Sync + Algebra<PackedF>,
+{
+    assert!(log2_strict_usize(evals.len()) >= 1);
+    assert_eq!(evals.len(), weights.len());
+
+    let mid = evals.len() / 2;
+    let (evals_lo, evals_hi) = evals.split_at(mid);
+    let (weights_lo, weights_hi) = weights.split_at(mid);
+
+    if evals.len() >= PARALLEL_THRESHOLD {
+        evals_lo
+            .par_iter()
+            .zip(evals_hi.par_iter())
+            .zip(weights_lo.par_iter().zip(weights_hi.par_iter()))
+            .map(|((&e_lo, &e_hi), (&w_lo, &w_hi))| {
+                let c0_term = w_lo * e_lo;
+                let c2_term = (w_hi.double() - w_lo) * (e_hi.double() - e_lo);
+                (c0_term, c2_term)
+            })
+            .par_fold_reduce(
+                || (PackedEF::ZERO, PackedEF::ZERO),
+                |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
+                |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
+            )
+    } else {
+        evals_lo
+            .iter()
+            .zip(evals_hi.iter())
+            .zip(weights_lo.iter().zip(weights_hi.iter()))
+            .fold(
+                (PackedEF::ZERO, PackedEF::ZERO),
+                |(a0, a2), ((&e_lo, &e_hi), (&w_lo, &w_hi))| {
+                    let c0_term = w_lo * e_lo;
+                    let c2_term = (w_hi.double() - w_lo) * (e_hi.double() - e_lo);
+                    (a0 + c0_term, a2 + c2_term)
+                },
+            )
+    }
+}
+
 /// Represents a multilinear polynomial `f` in `n` variables, stored by its evaluations
 /// over the boolean hypercube `{0,1}^n`.
 ///
@@ -333,9 +379,6 @@ impl<F: Field> Poly<F> {
 
     /// Computes quadratic sumcheck coefficients directly from base-field
     /// evaluations and packed extension-field weights.
-    ///
-    /// This avoids materializing a packed copy of `self` just to compute the
-    /// first-round `(h(0), h(2))` coefficients.
     #[inline]
     pub fn sumcheck_coefficients_packed<EF>(
         &self,
@@ -345,45 +388,10 @@ impl<F: Field> Poly<F> {
         EF: ExtensionField<F>,
         EF::ExtensionPacking: Copy + Send + Sync + Algebra<F::Packing>,
     {
-        let evals = F::Packing::pack_slice(self.as_slice());
-        let weights = weights.as_slice();
-
-        assert!(log2_strict_usize(evals.len()) >= 1);
-        assert_eq!(evals.len(), weights.len());
-
-        let mid = evals.len() / 2;
-        let (evals_lo, evals_hi) = evals.split_at(mid);
-        let (weights_lo, weights_hi) = weights.split_at(mid);
-
-        if evals.len() >= PARALLEL_THRESHOLD {
-            evals_lo
-                .par_iter()
-                .zip(evals_hi.par_iter())
-                .zip(weights_lo.par_iter().zip(weights_hi.par_iter()))
-                .map(|((&e_lo, &e_hi), (&w_lo, &w_hi))| {
-                    let c0_term = w_lo * e_lo;
-                    let c2_term = (w_hi.double() - w_lo) * (e_hi.double() - e_lo);
-                    (c0_term, c2_term)
-                })
-                .par_fold_reduce(
-                    || (EF::ExtensionPacking::ZERO, EF::ExtensionPacking::ZERO),
-                    |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
-                    |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
-                )
-        } else {
-            evals_lo
-                .iter()
-                .zip(evals_hi.iter())
-                .zip(weights_lo.iter().zip(weights_hi.iter()))
-                .fold(
-                    (EF::ExtensionPacking::ZERO, EF::ExtensionPacking::ZERO),
-                    |(a0, a2), ((&e_lo, &e_hi), (&w_lo, &w_hi))| {
-                        let c0_term = w_lo * e_lo;
-                        let c2_term = (w_hi.double() - w_lo) * (e_hi.double() - e_lo);
-                        (a0 + c0_term, a2 + c2_term)
-                    },
-                )
-        }
+        sumcheck_coefficients_packed_slices::<F::Packing, EF::ExtensionPacking>(
+            F::Packing::pack_slice(self.as_slice()),
+            weights.as_slice(),
+        )
     }
 
     /// Fixes the low variables of a multilinear polynomial using the split eq
@@ -1827,4 +1835,5 @@ pub(crate) mod test {
             assert_eq!(c2, expected.1, "c2 mismatch for k={k}");
         }
     }
+
 }

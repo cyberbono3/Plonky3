@@ -1,5 +1,6 @@
 //! Sumcheck prover: constructs and executes the sumcheck protocol for multilinear polynomials.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use p3_challenger::{FieldChallenger, GrindingChallenger};
@@ -184,7 +185,7 @@ where
         statement.combine_hypercube_packed::<F, false>(&mut weights, &mut sum, alpha);
 
         // Compute `(h(0), h(2))` directly from base-field evaluations and packed
-        // weights, avoiding a transient packed copy of `poly`.
+        // weights without materializing an extension-field copy of the evals.
         let (c0, c2) = poly.sumcheck_coefficients_packed::<EF>(&weights);
         let c0 = EF::ExtensionPacking::to_ext_iter([c0]).sum();
         let c2 = EF::ExtensionPacking::to_ext_iter([c2]).sum();
@@ -192,7 +193,7 @@ where
         let r = sumcheck_data.observe_and_sample(challenger, c0, c2, pow_bits);
 
         weights.fix_lo_var_mut(r);
-        let evals = poly.compress_lo_to_packed(&Point::new(alloc::vec![r]), EF::ONE);
+        let evals = poly.compress_lo_to_packed(&Point::new(vec![r]), EF::ONE);
         sum = extrapolate_012(c0, sum - c0, c2, r);
 
         let mut poly = ProductPolynomial::<F, EF>::new_packed(evals, weights);
