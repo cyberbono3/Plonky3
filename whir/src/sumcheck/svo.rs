@@ -103,7 +103,7 @@ pub fn points_012<F: Field>(l: usize) -> [Vec<Vec<F>>; 2] {
 /// # Returns
 ///
 /// One accumulator value per grid point.
-fn calculate_accumulators_lagrange<F: Field, EF: ExtensionField<F>>(
+fn calculate_accumulators<F: Field, EF: ExtensionField<F>>(
     us: &[Vec<F>],
     partial_evals: &[EF],
     point: &[EF],
@@ -288,10 +288,8 @@ impl<F: Field, EF: ExtensionField<F>> SvoClaim<F, EF> {
         let accumulators = (1..=z_svo.num_vars())
             .map(|i| {
                 let us = points_012::<F>(i);
-                let acc0 =
-                    calculate_accumulators_lagrange(&us[0], partial_evals.as_slice(), z_svo.as_slice());
-                let acc2 =
-                    calculate_accumulators_lagrange(&us[1], partial_evals.as_slice(), z_svo.as_slice());
+                let acc0 = calculate_accumulators(&us[0], partial_evals.as_slice(), z_svo.as_slice());
+                let acc2 = calculate_accumulators(&us[1], partial_evals.as_slice(), z_svo.as_slice());
                 [acc0, acc2]
             })
             .collect();
