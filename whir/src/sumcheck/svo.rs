@@ -21,7 +21,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use itertools::Itertools;
-use p3_field::{dot_product, ExtensionField, Field, PackedValue};
+use p3_field::{ExtensionField, Field, PackedValue, dot_product};
 use p3_maybe_rayon::prelude::*;
 use p3_multilinear_util::point::Point;
 use p3_multilinear_util::poly::Poly;
@@ -518,7 +518,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use p3_field::extension::BinomialExtensionField;
-    use p3_field::{dot_product, PrimeCharacteristicRing};
+    use p3_field::{PrimeCharacteristicRing, dot_product};
     use p3_koala_bear::KoalaBear;
     use proptest::prelude::*;
     use rand::rngs::SmallRng;

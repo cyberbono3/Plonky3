@@ -7,8 +7,8 @@ use p3_field::{
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
-use rand::distr::{Distribution, StandardUniform};
 use rand::RngExt;
+use rand::distr::{Distribution, StandardUniform};
 use serde::{Deserialize, Serialize};
 
 use crate::eq_batch::eval_eq_batch;
@@ -739,8 +739,8 @@ pub(crate) mod test {
     use p3_baby_bear::BabyBear;
     use p3_field::extension::BinomialExtensionField;
     use p3_field::{
-        dot_product, ExtensionField, Field, PackedFieldExtension, PackedValue,
-        PrimeCharacteristicRing, PrimeField64,
+        ExtensionField, Field, PackedFieldExtension, PackedValue, PrimeCharacteristicRing,
+        PrimeField64, dot_product,
     };
     use p3_matrix::dense::RowMajorMatrixView;
     use p3_util::log2_strict_usize;
@@ -750,7 +750,7 @@ pub(crate) mod test {
 
     use crate::eq_batch::eval_eq_batch;
     use crate::point::Point;
-    use crate::poly::{Poly, PARALLEL_THRESHOLD};
+    use crate::poly::{PARALLEL_THRESHOLD, Poly};
 
     type F = BabyBear;
     type PackedF = <F as p3_field::Field>::Packing;
@@ -1029,13 +1029,13 @@ pub(crate) mod test {
         let e1 = F::from_u64(6); // increment when x_2 = 1
         let e2 = F::from_u64(7); // increment when x_1 = 1
         let e3 = F::from_u64(8); // increment when x_1 = x_2 = 1
-                                 //
-                                 // So concretely:
-                                 //
-                                 //   f(0, 0) = 5
-                                 //   f(0, 1) = 5 + 6 = 11
-                                 //   f(1, 0) = 5 + 7 = 12
-                                 //   f(1, 1) = 5 + 6 + 7 + 8 = 26
+        //
+        // So concretely:
+        //
+        //   f(0, 0) = 5
+        //   f(0, 1) = 5 + 6 = 11
+        //   f(1, 0) = 5 + 7 = 12
+        //   f(1, 1) = 5 + 6 + 7 + 8 = 26
         let evals = Poly::new(vec![e0, e0 + e1, e0 + e2, e0 + e1 + e2 + e3]);
 
         // Choose evaluation point:
