@@ -516,6 +516,7 @@ mod tests {
 
     use super::*;
     use crate::parameters::SumcheckStrategy;
+    use crate::sumcheck::svo::{SvoAccumulatorStrategy, SvoClaim};
 
     type F = BabyBear;
     type EF = BinomialExtensionField<F, 4>;
@@ -573,5 +574,96 @@ mod tests {
         );
         assert_eq!(classic_prover.sum, svo_prover.sum);
         assert_eq!(classic_prover.evals(), svo_prover.evals());
+    }
+
+    #[test]
+    fn test_svo_jolt_matches_lagrange_first_round_batch() {
+        let mut rng = SmallRng::seed_from_u64(11);
+        let num_vars = 12;
+        let folding_factor = 4;
+        let poly = Poly::new((0..1 << num_vars).map(|_| rng.random()).collect::<Vec<F>>());
+
+        let points = (0..3)
+            .map(|_| Point::<EF>::rand(&mut rng, num_vars))
+            .collect::<Vec<_>>();
+        let lagrange = points
+            .iter()
+            .map(|point| {
+                SvoClaim::<F, EF>::new_with_strategy(
+                    point,
+                    folding_factor,
+                    &poly,
+                    SvoAccumulatorStrategy::Lagrange,
+                )
+            })
+            .collect::<Vec<_>>();
+        let jolt = points
+            .iter()
+            .map(|point| {
+                SvoClaim::<F, EF>::new_with_strategy(
+                    point,
+                    folding_factor,
+                    &poly,
+                    SvoAccumulatorStrategy::Jolt,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut lagrange_data = SumcheckData::default();
+        let mut jolt_data = SumcheckData::default();
+        let mut lagrange_challenger = make_challenger();
+        let mut jolt_challenger = make_challenger();
+
+        let (mut lagrange_prover, lagrange_rs) = SumcheckProver::new_svo(
+            &poly,
+            &mut lagrange_data,
+            &mut lagrange_challenger,
+            folding_factor,
+            0,
+            &lagrange,
+        );
+        let (mut jolt_prover, jolt_rs) = SumcheckProver::new_svo(
+            &poly,
+            &mut jolt_data,
+            &mut jolt_challenger,
+            folding_factor,
+            0,
+            &jolt,
+        );
+
+        assert_eq!(lagrange_rs, jolt_rs);
+        assert_eq!(
+            lagrange_data.polynomial_evaluations,
+            jolt_data.polynomial_evaluations
+        );
+        assert_eq!(lagrange_prover.sum, jolt_prover.sum);
+        assert_eq!(lagrange_prover.evals(), jolt_prover.evals());
+
+        let next_folding_factor = 2;
+        let mut lagrange_next_data = SumcheckData::default();
+        let mut jolt_next_data = SumcheckData::default();
+
+        let lagrange_next_rs = lagrange_prover.compute_sumcheck_polynomials(
+            &mut lagrange_next_data,
+            &mut lagrange_challenger,
+            next_folding_factor,
+            0,
+            None,
+        );
+        let jolt_next_rs = jolt_prover.compute_sumcheck_polynomials(
+            &mut jolt_next_data,
+            &mut jolt_challenger,
+            next_folding_factor,
+            0,
+            None,
+        );
+
+        assert_eq!(lagrange_next_rs, jolt_next_rs);
+        assert_eq!(
+            lagrange_next_data.polynomial_evaluations,
+            jolt_next_data.polynomial_evaluations
+        );
+        assert_eq!(lagrange_prover.sum, jolt_prover.sum);
+        assert_eq!(lagrange_prover.evals(), jolt_prover.evals());
     }
 }

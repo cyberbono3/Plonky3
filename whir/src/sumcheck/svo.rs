@@ -190,6 +190,7 @@ fn evals_012_grid<F: Field>(boolean_evals: &[F]) -> Vec<F> {
     recurse(boolean_evals, num_vars)
 }
 
+/// Returns the elementwise products of two equally sized slices.
 fn pointwise_products<F: Field>(lhs: &[F], rhs: &[F]) -> Vec<F> {
     lhs.iter()
         .copied()
